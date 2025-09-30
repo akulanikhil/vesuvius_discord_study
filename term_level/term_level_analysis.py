@@ -39,23 +39,20 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 
-# Stemming (no external downloads required for Snowball)
+# stemming
 try:
     from nltk.stem import SnowballStemmer
     STEMMER_AVAILABLE = True
 except Exception:
     STEMMER_AVAILABLE = False
 
-# -----------------------
-# Utilities: loading JSON
-# -----------------------
+# json loader
 
 SYSTEM_MSG_RE = re.compile(r"^\s*(Joined the server\.|Started a thread\.)\s*$", re.I)
 URL_ONLY_RE   = re.compile(r"^\s*(https?://\S+\s*)+$", re.I)
 URL_INLINE_RE = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)
 
 def load_discord_dir(input_dir: Path) -> pd.DataFrame:
-    """Load Discord JSON exports into a message-level DataFrame."""
     rows = []
     for p in input_dir.rglob("*.json"):
         try:
@@ -84,12 +81,9 @@ def load_discord_dir(input_dir: Path) -> pd.DataFrame:
     df["text"] = df["text"].astype(str)
     return df
 
-# -----------------------
-# Cleaning / Prep
-# -----------------------
+# data cleaning
 
 def clean_messages(df: pd.DataFrame, min_doc_len: int = 10) -> pd.DataFrame:
-    """Remove blank/system/url-only; strip whitespace; keep messages >= min_doc_len chars; drop inline links."""
     if df.empty:
         return df
     df = df.copy()
@@ -108,15 +102,13 @@ def clean_messages(df: pd.DataFrame, min_doc_len: int = 10) -> pd.DataFrame:
     df = df[df["text"].str.len() >= int(min_doc_len)]
     return df
 
-# -----------------------
-# Stopwords & Analyzer
-# -----------------------
+# removing extra stopwords as well as contractions
 
-# Extra contractions/fillers beyond scikit-learn’s list
+# Extra contractions/fillers beyond scikit-learn list
 DEFAULT_EXTRA_STOPS = {
-    # frequent fillers
+    # filler words
     "like", "also", "really", "just", "okay", "ok", "yeah", "yep", "nope", "kinda", "sorta",
-    # common contractions (normalize to lower-case)
+    # common contraction
     "i'm", "im", "you're", "youre", "he's", "she's", "it's", "its", "we're", "weve", "we've",
     "they're", "theyre", "that's", "thats", "there's", "theres", "what's", "whats", "who's",
     "dont", "don't", "doesnt", "doesn't", "isnt", "isn't", "wasnt", "wasn't", "shouldn't",
@@ -124,17 +116,10 @@ DEFAULT_EXTRA_STOPS = {
     "can't", "cant", "haven't", "havent", "hasn't", "hasnt", "hadn't", "hadnt", "i'll", "ill",
     "you'll", "youll", "we'll", "well", "they'll", "theyll", "i'd", "id", "you'd", "youd",
     "we'd", "wed", "they'd", "theyd", "ive", "i've",
-    # optional modals (remove if you prefer)
     "could", "would", "should",
 }
-
+# adding scikit learn and custom stops
 def build_stopwords(extra: Optional[str]) -> Set[str]:
-    """
-    Build a comprehensive stopword set:
-      - scikit-learn ENGLISH_STOP_WORDS
-      - DEFAULT_EXTRA_STOPS
-      - user provided via --extra_stopwords (comma-separated)
-    """
     stops = set(ENGLISH_STOP_WORDS) | set(DEFAULT_EXTRA_STOPS)
     if extra:
         user_extra = {w.strip().lower() for w in extra.split(",") if w.strip()}
@@ -144,13 +129,7 @@ def build_stopwords(extra: Optional[str]) -> Set[str]:
 def make_analyzer(ngram_mode: str,
                   do_stem: bool,
                   stopwords: Set[str]) -> Callable[[str], List[str]]:
-    """
-    Return a callable analyzer that scikit-learn will call.
-    Important: When analyzer is callable, CountVectorizer ignores ngram_range,
-    so this function must emit *exactly* the tokens/grams you want.
-    - 'uni': returns unigrams (tokens)
-    - 'bi' : returns bigram strings "a b" from adjacent tokens
-    """
+
     if do_stem and STEMMER_AVAILABLE:
         stemmer = SnowballStemmer("english")
     else:
@@ -161,7 +140,7 @@ def make_analyzer(ngram_mode: str,
 
     def base_tokens(text: str) -> List[str]:
         toks = base_token_re.findall(text.lower())
-        # drop 1-char tokens
+        # drop 1 character tokens
         toks = [t for t in toks if len(t) > 1]
         # stopword filter
         toks = [t for t in toks if t not in stopwords]
@@ -173,34 +152,27 @@ def make_analyzer(ngram_mode: str,
     if ngram_mode == "uni":
         return base_tokens
 
-    # ngram_mode == "bi": return "a b" strings
+    # for bigramss doing a b stringd
     def bigram_analyzer(doc: str) -> List[str]:
         toks = base_tokens(doc)
         return [f"{a} {b}" for a, b in zip(toks, toks[1:])]
 
     return bigram_analyzer
 
-# -----------------------
-# Vectorization helpers
-# -----------------------
+# vectorization helpers
 
 def vectorize_counts(docs: List[str],
                      analyzer: Callable[[str], List[str]],
                      min_df: int = 1) -> Tuple[CountVectorizer, np.ndarray]:
-    """
-    Fit CountVectorizer with a *callable analyzer* and return (vectorizer, X).
-    NOTE: With a callable analyzer, token_pattern/stop_words/ngram_range are ignored.
-    """
     vect = CountVectorizer(
         lowercase=True,
         min_df=min_df,
         analyzer=analyzer
     )
-    X = vect.fit_transform(docs)
-    return vect, X
+    x = vect.fit_transform(docs)
+    return vect, x
 
 def term_stats_from_counts(X, feature_names: List[str]) -> pd.DataFrame:
-    """Return DataFrame with columns: term/bigram, tf, df."""
     tf = np.asarray(X.sum(axis=0)).ravel()
     dfreq = np.asarray((X > 0).sum(axis=0)).ravel()
     out = pd.DataFrame({
@@ -210,17 +182,10 @@ def term_stats_from_counts(X, feature_names: List[str]) -> pd.DataFrame:
     }).sort_values(["tf","df","term"], ascending=[False, False, True])
     return out
 
-# -----------------------
-# Mutual Information (two corpora)
-# -----------------------
+# computing the mutual information score
 
 def mutual_information_binary(bigram_presence: np.ndarray, labels: np.ndarray, smoothing: float = 0.5):
-    """
-    Compute mutual information I(X;Y) for each bigram presence X (binary) vs Y in {0,1}.
-    Returns:
-      mi_bits: shape [N_terms]
-      counts: (n11, n01, n10, n00)
-    """
+
     N, M = bigram_presence.shape
     y = labels.astype(int)
 
@@ -239,18 +204,18 @@ def mutual_information_binary(bigram_presence: np.ndarray, labels: np.ndarray, s
     n10s = n10 + smoothing
     n00s = n00 + smoothing
 
-    Ns = n11s + n01s + n10s + n00s
+    ns = n11s + n01s + n10s + n00s
 
     # probabilities
-    p11 = n11s / Ns
-    p01 = n01s / Ns
-    p10 = n10s / Ns
-    p00 = n00s / Ns
+    p11 = n11s / ns
+    p01 = n01s / ns
+    p10 = n10s / ns
+    p00 = n00s / ns
 
-    px1 = (n11s + n01s) / Ns
-    px0 = (n10s + n00s) / Ns
-    py1 = (n11s + n10s) / Ns
-    py0 = (n01s + n00s) / Ns
+    px1 = (n11s + n01s) / ns
+    px0 = (n10s + n00s) / ns
+    py1 = (n11s + n10s) / ns
+    py0 = (n01s + n00s) / ns
 
     def safe_term(pxy, px, py):
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -267,16 +232,10 @@ def mutual_information_binary(bigram_presence: np.ndarray, labels: np.ndarray, s
 
     return mi, (n11, n01, n10, n00)
 
-# -----------------------
-# Corpus labeling for MI
-# -----------------------
+# labeling the corpus for the mutual information score
 
 def label_corpora_for_mi(df: pd.DataFrame, pap_pat: str, gen_pat: str) -> pd.Series:
-    """
-    Return Series of labels for MI:
-      1 = Papyrology, 0 = General, NaN = neither (excluded from MI step).
-    Matches if channel_name OR category matches the regex (case-insensitive).
-    """
+
     papy = df["channel_name"].fillna("").str.contains(pap_pat, case=False, regex=True) \
          | df["category"].fillna("").str.contains(pap_pat, case=False, regex=True)
     gen  = df["channel_name"].fillna("").str.contains(gen_pat,  case=False, regex=True) \
@@ -284,12 +243,10 @@ def label_corpora_for_mi(df: pd.DataFrame, pap_pat: str, gen_pat: str) -> pd.Ser
 
     labels = pd.Series(np.nan, index=df.index, dtype="float")
     labels[papy] = 1.0
-    labels[gen & ~papy] = 0.0  # prefer papyrology if both match (rare)
+    labels[gen & ~papy] = 0.0  # prefer papyrology if both match (proably wont happen)
     return labels
 
-# -----------------------
-# Main
-# -----------------------
+#main
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -300,7 +257,7 @@ def parse_args():
     ap.add_argument("--papyrology_pattern", type=str, default=r"papyrolog", help="regex to detect Papyrology channels/categories")
     ap.add_argument("--general_pattern", type=str, default=r"general", help="regex to detect General channels/categories")
 
-    # New options for stemming/stopwords
+    # new options for stemming/stopwords
     ap.add_argument("--no_stem", action="store_true",
                     help="Disable stemming (default is ON if nltk SnowballStemmer available).")
     ap.add_argument("--extra_stopwords", type=str, default="",
@@ -326,7 +283,7 @@ def main():
     docs = df["text"].tolist()
     print(f"Kept {len(docs):,} documents.")
 
-    # Build stopword set & analyzers
+    # build stopword set & analyzers
     stops = build_stopwords(args.extra_stopwords)
     do_stem = (not args.no_stem) and STEMMER_AVAILABLE
     if (not STEMMER_AVAILABLE) and (not args.no_stem):
@@ -349,7 +306,7 @@ def main():
     bi_stats_all_out = bi_stats_all.head(args.top_k) if args.top_k > 0 else bi_stats_all
     bi_stats_all_out.to_csv(outdir / "bigrams_single_corpus.csv", index=False)
 
-    # Diagnostics for bigrams
+    # Diagnostics
     print("Sample bigrams:", bi_stats_all["term"].head(10).tolist())
     print("Bigrams kept count:", len(bi_stats_all))
 
@@ -366,19 +323,19 @@ def main():
     else:
         print(f"Label counts -> Papyrology: {(y==1).sum()}, General: {(y==0).sum()}")
         docs_mi = df_mi["text"].tolist()
-        vec_bi_mi, X_bi_mi_counts = vectorize_counts(docs_mi, analyzer=bi_analyzer, min_df=2)
+        vec_bi_mi, x_bi_mi_counts = vectorize_counts(docs_mi, analyzer=bi_analyzer, min_df=2)
         # presence
-        X_bi_mi_bin = (X_bi_mi_counts > 0).astype(int)
+        x_bi_mi_bin = (x_bi_mi_counts > 0).astype(int)
 
         # compute MI
-        mi_bits, counts = mutual_information_binary(X_bi_mi_bin, y, smoothing=0.5)
+        mi_bits, counts = mutual_information_binary(x_bi_mi_bin, y, smoothing=0.5)
         n11, n01, n10, n00 = counts
 
         terms = vec_bi_mi.get_feature_names_out()
 
-        N = X_bi_mi_bin.shape[0]
-        p_papy = (y == 1).sum() / N
-        p_gen  = (y == 0).sum() / N
+        n = x_bi_mi_bin.shape[0]
+        p_papy = (y == 1).sum() / n
+        p_gen  = (y == 0).sum() / n
 
         mi_df = pd.DataFrame({
             "bigram": terms,
@@ -402,7 +359,7 @@ def main():
     print(f"Bigrams  vocab size:  {X_bi_all.shape[1]:,} (pre-sort)")
     print(f"Bigrams  kept:        {len(bi_stats_all):,}")
     if not df_mi.empty and y.size > 0 and len(np.unique(y)) >= 2 and len(terms) > 0:
-        print(f"MI subset docs:       {X_bi_mi_bin.shape[0]:,} (Papy={int((y==1).sum())}, General={int((y==0).sum())})")
+        print(f"MI subset docs:       {x_bi_mi_bin.shape[0]:,} (Papy={int((y==1).sum())}, General={int((y==0).sum())})")
         print(f"MI bigrams analyzed:  {len(terms):,}")
     else:
         print("MI: skipped or no terms after vectorization.")
